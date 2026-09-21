@@ -495,9 +495,21 @@ def main():
         if resume_ckpt.get("scaler_state"):
             scaler.load_state_dict(resume_ckpt["scaler_state"])
         if resume_ckpt.get("rng_state") is not None:
-            torch.set_rng_state(resume_ckpt["rng_state"])
+            # map_location=device (cuda) moves every tensor in the checkpoint
+            # onto the GPU, including rng_state -- but torch.set_rng_state()
+            # only accepts a CPU-resident ByteTensor ("This function only
+            # works for CPU" per its own docstring) and raises "RNG state
+            # must be a torch.ByteTensor" on a CUDA one, even though it's
+            # still a ByteTensor by dtype. Move it back to CPU explicitly.
+            torch.set_rng_state(resume_ckpt["rng_state"].cpu())
         if torch.cuda.is_available() and resume_ckpt.get("cuda_rng_state_all") is not None:
-            torch.cuda.set_rng_state_all(resume_ckpt["cuda_rng_state_all"])
+            # Same map_location issue as rng_state above: CUDA RNG state is
+            # conventionally stored as CPU tensors even for a CUDA
+            # generator (torch.cuda.get_rng_state_all() itself returns CPU
+            # tensors) -- move each one back to CPU defensively.
+            torch.cuda.set_rng_state_all(
+                [s.cpu() for s in resume_ckpt["cuda_rng_state_all"]]
+            )
         start_step = int(resume_ckpt["step"])
         print(f"Resuming from step {start_step}: {args.resume_from}")
     parameter_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
