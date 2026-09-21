@@ -72,11 +72,21 @@ class DynamicSparsityController:
         return self.k
 
     def state_dict(self):
-        return {"k": self.k, "exploration_fraction": self.exploration_fraction}
+        return {
+            "k": self.k,
+            "exploration_fraction": self.exploration_fraction,
+            "loss_history": list(self._loss_history),
+            "steps_since_change": self._steps_since_change,
+        }
 
     def load_state_dict(self, state):
         self.k = state["k"]
         self.exploration_fraction = state["exploration_fraction"]
+        # .get() with a safe default: an older checkpoint saved before this
+        # fix won't have these two keys. Resume still works, just without
+        # the trend history -- see the fix note below for what this changes.
+        self._loss_history = list(state.get("loss_history", []))
+        self._steps_since_change = state.get("steps_since_change", 0)
 
 
 class ProbationaryMemoryTracker:
@@ -135,6 +145,23 @@ class ProbationaryMemoryTracker:
 
     def population(self):
         return int(self.on_probation.sum().item())
+
+    def state_dict(self):
+        """Plain-object state, saved/restored explicitly by the caller
+        (this class is not an nn.Module, so ordinary checkpoint
+        save/load never touches it -- see the fix note in train.py)."""
+        return {
+            "miss_count": self.miss_count.clone(),
+            "success_count": self.success_count.clone(),
+            "on_probation": self.on_probation.clone(),
+            "step_count": self._step_count,
+        }
+
+    def load_state_dict(self, state):
+        self.miss_count = state["miss_count"].clone()
+        self.success_count = state["success_count"].clone()
+        self.on_probation = state["on_probation"].clone()
+        self._step_count = state["step_count"]
 
 
 def build_hex_neighbor_table(n_features: int) -> torch.Tensor:
@@ -221,7 +248,13 @@ class SparseSuperpositionLinear(nn.Module):
         if nudge_indices is not None and nudge_indices.numel() > 0:
             # PTM nudge: force-include probationary units at a small,
             # non-disruptive magnitude so they keep receiving gradient.
-            nudge_vals = pre[..., nudge_indices].detach() * 0.5 + 1e-3
+            # FIX: no .detach() here -- the previous version detached this
+            # value, which silently severed the gradient back to in_proj
+            # for exactly the features this mechanism exists to train,
+            # defeating its stated purpose (dead-feature prevention can't
+            # make a probationary feature competitive again if it never
+            # receives a gradient while forced active).
+            nudge_vals = pre[..., nudge_indices] * 0.5 + 1e-3
             sparse[..., nudge_indices] = torch.maximum(sparse[..., nudge_indices], nudge_vals)
 
         mask = sparse > 0

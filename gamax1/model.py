@@ -43,20 +43,19 @@ from .layers import (
 def apply_repetition_penalty(logits: torch.Tensor, present: torch.Tensor, penalty: float) -> torch.Tensor:
     """Suppress tokens already present in the sequence during sampling.
 
-    ``logits``: (batch, vocab); ``present``: (vocab,) bool mask of tokens to
-    penalize. Positive logits are divided by ``penalty`` and negative ones are
-    multiplied by it, so both directions push the token's probability down.
-    A penalty of 1.0 is the identity.
+    ``logits``: (batch, vocab); ``present``: (batch, vocab) bool mask, True
+    where that batch row's own sequence already contains the token -- or a
+    (vocab,) mask applied identically to every row, for a single shared
+    sequence. Positive logits are divided by ``penalty`` and negative ones
+    are multiplied by it, so both directions push the token's probability
+    down. A penalty of 1.0 is the identity. Uses ``torch.where`` (elementwise,
+    broadcasting-safe) rather than boolean fancy-indexing, so a per-row
+    ``present`` mask is applied per-row rather than collapsing the batch.
     """
     if penalty == 1.0:
         return logits
-    adjusted = logits.clone()
-    adjusted[..., present] = torch.where(
-        logits[..., present] > 0,
-        logits[..., present] / penalty,
-        logits[..., present] * penalty,
-    )
-    return adjusted
+    scaled = torch.where(logits > 0, logits / penalty, logits * penalty)
+    return torch.where(present, scaled, logits)
 
 
 class CausalSelfAttention(nn.Module):
@@ -235,6 +234,31 @@ class GamaX1Model(nn.Module):
         k = k if k is not None else self.sparsity_ctrl.k
         return k * len(self.blocks)
 
+    def ptm_state_dicts(self):
+        """List of each block's ProbationaryMemoryTracker state, in block
+        order (``None`` for a dense-mode block, which has no PTM). PTM
+        objects are plain Python objects, not nn.Modules, so they are
+        NOT captured by ``state_dict()``/``load_state_dict()`` -- without
+        explicitly saving/restoring this, a resumed run starts every
+        layer's dead-feature tracking from scratch (miss/success counts,
+        probation membership all reset), even though the model weights
+        themselves resumed correctly."""
+        return [
+            block.ffn.ptm.state_dict() if hasattr(block.ffn, "ptm") else None
+            for block in self.blocks
+        ]
+
+    def load_ptm_state_dicts(self, states):
+        """Inverse of ``ptm_state_dicts``. Tolerant of a shorter/None list
+        (e.g. an older checkpoint saved before this existed) -- restores
+        whatever is present and leaves the rest at their freshly-initialized
+        state rather than raising."""
+        if not states:
+            return
+        for block, state in zip(self.blocks, states):
+            if state is not None and hasattr(block.ffn, "ptm"):
+                block.ffn.ptm.load_state_dict(state)
+
     @torch.no_grad()
     def generate(self, idx, max_new_tokens: int, temperature: float = 1.0, top_k: int = None,
                  repetition_penalty: float = 1.0, use_hierarchical_exit: bool = False,
@@ -287,8 +311,13 @@ class GamaX1Model(nn.Module):
 
             logits = logits / max(temperature, 1e-6)
             if repetition_penalty != 1.0:
-                present = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
-                present[idx[0]] = True
+                # Per-row mask: (batch, vocab), True where THAT row's own
+                # sequence-so-far contains the token -- not just row 0's,
+                # so batched generation penalizes each sequence by its own
+                # history (previously all rows were penalized using only
+                # sequence 0's tokens).
+                present = torch.zeros(idx.size(0), logits.shape[-1], dtype=torch.bool, device=logits.device)
+                present.scatter_(1, idx, True)
                 logits = apply_repetition_penalty(logits, present, float(repetition_penalty))
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))

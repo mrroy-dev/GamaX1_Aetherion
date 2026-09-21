@@ -30,7 +30,8 @@ END_MARKERS = [
 # Curated list of long, well-known, public-domain novels (Gutenberg IDs),
 # chosen for length + author/genre variety. Rough combined size: several
 # million words when all succeed.
-DEFAULT_BOOK_IDS = [
+# which one is actually used by default.
+CURATED_BOOK_IDS = [
     100,    # Complete Works of William Shakespeare
     98,     # A Tale of Two Cities
     84,     # Frankenstein
@@ -126,10 +127,15 @@ DEFAULT_BOOK_IDS = [
     910,    # White Fang
 ]
 
-# Default to 400 Gutenberg IDs. Unavailable or non-book IDs are skipped by
-# the downloader below and reported in the final summary. The curated list
-# above remains available as a reference for hand-selecting known works.
-DEFAULT_BOOK_IDS = list(range(1, 401))
+# The plain-range preset: Gutenberg IDs 1-400. Unavailable or non-book IDs
+# are skipped by the downloader below and reported in the final summary.
+RANGE_BOOK_IDS = list(range(1, 401))
+
+# This IS the actual default used when neither --ids nor --preset is given
+# (see --preset's choices/default below) -- explicit, not a silent
+# overwrite of the curated list.
+DEFAULT_PRESET = "range_1_400"
+PRESETS = {"curated": CURATED_BOOK_IDS, "range_1_400": RANGE_BOOK_IDS}
 
 
 def strip_gutenberg_boilerplate(text: str) -> str:
@@ -165,9 +171,13 @@ def download_book(gutenberg_id: int) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Download and combine multiple Gutenberg books for GamaX1 training.")
     parser.add_argument("--gutenberg_id", type=int, default=None,
-                         help="Download a single book by ID (overrides --ids / default list).")
+                         help="Download a single book by ID (overrides --ids/--preset).")
     parser.add_argument("--ids", type=int, nargs="+", default=None,
-                         help="Download and combine a custom list of Gutenberg IDs.")
+                         help="Download and combine a custom list of Gutenberg IDs (overrides --preset).")
+    parser.add_argument("--preset", choices=sorted(PRESETS), default=DEFAULT_PRESET,
+                         help=f"Which built-in ID list to use when --ids/--gutenberg_id are not given: "
+                              f"'curated' ({len(PRESETS['curated'])} hand-picked long, well-known novels) or "
+                              f"'range_1_400' (plain Gutenberg IDs 1-400, unfiltered). Default: '{DEFAULT_PRESET}'.")
     parser.add_argument("--out", type=str, default="data/sample_corpus_combined.txt")
     parser.add_argument("--delay", type=float, default=1.0,
                          help="Seconds to wait between downloads, polite to Gutenberg's servers (default: 1.0).")
@@ -178,7 +188,8 @@ def main():
     elif args.ids is not None:
         book_ids = args.ids
     else:
-        book_ids = DEFAULT_BOOK_IDS
+        book_ids = PRESETS[args.preset]
+        print(f"Using preset '{args.preset}' ({len(book_ids)} ids). Pass --preset to choose the other one.")
 
     combined_parts = []
     succeeded, failed = [], []

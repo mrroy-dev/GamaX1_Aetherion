@@ -179,7 +179,7 @@ def get_batch(
 ):
     """Sample next-token windows, optionally from a predefined split."""
     if start_indices is None:
-        ix = torch.randint(len(data) - block_size - 1, (batch_size,))
+        ix = torch.randint(len(data) - block_size, (batch_size,))
     else:
         if start_indices.numel() == 0:
             raise ValueError("start_indices must not be empty")
@@ -262,6 +262,7 @@ def checkpoint_dict(model, optimizer, tokenizer, config, step: int, scaler=None)
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "sparsity_controller_state": model.sparsity_ctrl.state_dict(),
+        "ptm_states": model.ptm_state_dicts(),
         "step": step,
         "vocab": vocab,
         "merges": merges,
@@ -490,6 +491,7 @@ def main():
         model.load_state_dict(resume_ckpt["model_state"])
         optimizer.load_state_dict(resume_ckpt["optimizer_state"])
         model.sparsity_ctrl.load_state_dict(resume_ckpt["sparsity_controller_state"])
+        model.load_ptm_state_dicts(resume_ckpt.get("ptm_states"))
         if resume_ckpt.get("scaler_state"):
             scaler.load_state_dict(resume_ckpt["scaler_state"])
         if resume_ckpt.get("rng_state") is not None:
