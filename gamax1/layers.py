@@ -158,9 +158,19 @@ class ProbationaryMemoryTracker:
         }
 
     def load_state_dict(self, state):
-        self.miss_count = state["miss_count"].clone()
-        self.success_count = state["success_count"].clone()
-        self.on_probation = state["on_probation"].clone()
+        # .cpu() is essential, not defensive-only: on a GPU run, the
+        # checkpoint these tensors came from was loaded via
+        # torch.load(..., map_location=device) with device='cuda', which
+        # moves EVERY tensor in the checkpoint onto the GPU -- including
+        # these, even though PTM is a plain object (not an nn.Module) that
+        # model.to(device) never touches, so update() below still expects
+        # CPU tensors (it explicitly .cpu()s the mask it compares against).
+        # Without this, resume crashes with a cuda:0/cpu device mismatch
+        # the first time update() runs -- the same class of bug fixed for
+        # rng_state/cuda_rng_state_all in train.py's checkpoint resume.
+        self.miss_count = state["miss_count"].clone().cpu()
+        self.success_count = state["success_count"].clone().cpu()
+        self.on_probation = state["on_probation"].clone().cpu()
         self._step_count = state["step_count"]
 
 
