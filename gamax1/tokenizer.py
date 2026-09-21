@@ -170,7 +170,7 @@ class BPETokenizer:
     # save/load -- append new entries at the end, never reorder or
     # remove an existing one (that would silently reassign an id a
     # trained checkpoint already relies on).
-    SPECIAL_TOKENS = ("<|eos|>", "<|user|>", "<|assistant|>", "<|pad|>")
+    SPECIAL_TOKENS = ("<|eos|>", "<|user|>", "<|assistant|>", "<|pad|>", "<|think|>", "<|/think|>")
 
     def __init__(self, text: str = None, vocab_size: int = 8000, merges: list = None,
                  sample_chars: int = 3_000_000):
@@ -324,6 +324,22 @@ class BPETokenizer:
         have different lengths and need padding to batch together.
         """
         return self.special_token_ids["<|pad|>"]
+
+    @property
+    def think_id(self):
+        """Reserved id marking the start of a reasoning/chain-of-thought
+        trace within an assistant turn (from literal '<think>' markup in
+        some sources' already-tagged data). Not a turn/role boundary --
+        appears inside an assistant turn, not between turns."""
+        return self.special_token_ids["<|think|>"]
+
+    @property
+    def think_end_id(self):
+        """Reserved id marking the end of a reasoning trace (from literal
+        '</think>' markup). Some sources' records never close the tag
+        (the reasoning trace runs to the end of the assistant turn) --
+        that's fine, this id simply never appears in those records."""
+        return self.special_token_ids["<|/think|>"]
 
     @property
     def tokens(self):

@@ -47,12 +47,15 @@ import torch
 from .tokenizer import BPETokenizer
 
 
-# Default sub-directory names searched under the root data directory.
-# Any of these that exist will be included; missing ones are skipped.
-DEFAULT_SOURCE_DIRS = (
-    "books", "books2", "wiki",
-    "Conversations-200k", "Discord-Dialogues", "Reddit-Constructive",
-)
+# Explicit dataset paths used by the default corpus build.
+DATASETS = {
+    "books_cleaned_v1": "/content/drive/MyDrive/Aetherion_GamaX1/data/books_cleaned_v1",
+    "Math_Reasoning_train": "/content/drive/MyDrive/Aetherion_GamaX1/data/Math_Reasoning/train/books",
+    "Math_Reasoning_validation": "/content/drive/MyDrive/Aetherion_GamaX1/data/Math_Reasoning/validation/books",
+    "Conversations-200k_clean": "/content/drive/MyDrive/Aetherion_GamaX1/data/Conversations-200k_clean",
+}
+
+DEFAULT_SOURCE_DIRS = DATASETS
 
 # -- Per-source content format ----------------------------------------------
 #
@@ -100,12 +103,10 @@ SOURCE_FORMAT_USER_ASSISTANT = "user_assistant"
 SOURCE_FORMAT_GENERIC_TURNS = "generic_turns"
 
 DEFAULT_SOURCE_FORMATS = {
-    "books": SOURCE_FORMAT_PROSE,
-    "books2": SOURCE_FORMAT_PROSE,
-    "wiki": SOURCE_FORMAT_PROSE,
-    "Conversations-200k": SOURCE_FORMAT_USER_ASSISTANT,
-    "Discord-Dialogues": SOURCE_FORMAT_USER_ASSISTANT,
-    "Reddit-Constructive": SOURCE_FORMAT_GENERIC_TURNS,
+    "books_cleaned_v1": SOURCE_FORMAT_PROSE,
+    "Math_Reasoning_train": SOURCE_FORMAT_PROSE,
+    "Math_Reasoning_validation": SOURCE_FORMAT_PROSE,
+    "Conversations-200k_clean": SOURCE_FORMAT_USER_ASSISTANT,
 }
 
 _unknown_source_format_warned: set[str] = set()
@@ -314,48 +315,32 @@ class BulkTokenStore:
 
 
 def _collect_source_paths(data_dir: str | Path, source_dirs=DEFAULT_SOURCE_DIRS) -> dict[str, list[Path]]:
-    """Return a mapping of source-category name -> sorted .txt file paths.
-
-    Looks for each name in ``source_dirs`` as a sub-directory of ``data_dir``.
-    A source is skipped (not an error) if its sub-directory does not exist,
-    so users can add new categories incrementally without breaking older
-    corpora that only have some of them.
-
-    Backward compatibility: if none of ``source_dirs`` exist under
-    ``data_dir`` but ``data_dir`` itself directly contains .txt files (the
-    old single-folder layout), those files are treated as one source named
-    "books".
-    """
-    root = Path(data_dir)
-    if not root.is_dir():
-        raise FileNotFoundError(f"data directory does not exist: {root}")
+    """Collect text files from explicit dataset paths or legacy subfolders."""
+    if isinstance(source_dirs, dict):
+        candidates = [(str(name), Path(path)) for name, path in source_dirs.items()]
+    else:
+        root = Path(data_dir)
+        if not root.is_dir():
+            raise FileNotFoundError(f"data directory does not exist: {root}")
+        candidates = [(str(name), root / name) for name in source_dirs]
 
     sources: dict[str, list[Path]] = {}
-    for name in source_dirs:
-        sub_dir = root / name
-        if sub_dir.is_dir():
-            paths = sorted(
-                (path for path in sub_dir.rglob("*.txt") if path.is_file()),
-                key=lambda p: str(p),
-            )
-            if paths:
-                sources[name] = paths
+    for name, source_path in candidates:
+        if not source_path.is_dir():
+            continue
+        paths = sorted((p for p in source_path.rglob("*.txt") if p.is_file()), key=lambda p: str(p))
+        if paths:
+            sources[name] = paths
 
     if not sources:
-        # Backward-compatible fallback: old flat layout with .txt files
-        # directly under data_dir (no books/wiki/qna sub-folders).
-        flat_paths = sorted(
-            (path for path in root.rglob("*.txt") if path.is_file()),
-            key=lambda p: str(p),
-        )
-        if flat_paths:
-            sources["books"] = flat_paths
+        root = Path(data_dir)
+        if root.is_dir():
+            flat_paths = sorted((p for p in root.rglob("*.txt") if p.is_file()), key=lambda p: str(p))
+            if flat_paths:
+                sources["books"] = flat_paths
 
     if not sources:
-        raise ValueError(
-            f"no .txt files found under {root} "
-            f"(expected sub-folders like {source_dirs}, or .txt files directly inside)"
-        )
+        raise ValueError(f"no .txt files found for configured sources: {candidates}")
     return sources
 
 
