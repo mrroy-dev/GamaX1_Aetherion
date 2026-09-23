@@ -51,7 +51,6 @@ from .tokenizer import BPETokenizer
 DATASETS = {
     "books_cleaned_v1": "/content/drive/MyDrive/Aetherion_GamaX1/data/books_cleaned_v1",
     "Math_Reasoning_train": "/content/drive/MyDrive/Aetherion_GamaX1/data/Math_Reasoning/train/books",
-    "Math_Reasoning_validation": "/content/drive/MyDrive/Aetherion_GamaX1/data/Math_Reasoning/validation/books",
     "Conversations-200k_clean": "/content/drive/MyDrive/Aetherion_GamaX1/data/Conversations-200k_clean",
 }
 
@@ -105,7 +104,6 @@ SOURCE_FORMAT_GENERIC_TURNS = "generic_turns"
 DEFAULT_SOURCE_FORMATS = {
     "books_cleaned_v1": SOURCE_FORMAT_PROSE,
     "Math_Reasoning_train": SOURCE_FORMAT_PROSE,
-    "Math_Reasoning_validation": SOURCE_FORMAT_PROSE,
     "Conversations-200k_clean": SOURCE_FORMAT_USER_ASSISTANT,
 }
 
