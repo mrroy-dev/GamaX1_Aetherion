@@ -1,0 +1,7 @@
+{
+  "bpe_vocab_size": 300,
+  "cache_version": 2,
+  "source_sha256": "6e592be9cd4d3bd956421552136fe76c8234bdc315b76ac30112d993a8e894fc",
+  "tokenizer_merges_sha256": "60dd85c420af56a0a5cda3fa39f5e44d30100fdebc850ff70ec8d60bb1463a8d",
+  "vocab_size": 306
+}

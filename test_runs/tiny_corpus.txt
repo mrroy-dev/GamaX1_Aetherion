@@ -1,0 +1,10 @@
+Aetherion is a small language model research project.
+The model learns patterns from text.
+DICE is a research mechanism for efficient sequence processing.
+Training requires data, a tokenizer, a model, a loss, and an optimizer.
+This tiny corpus is only for pipeline testing.
+A model should produce finite outputs and valid gradients.
+We test forward pass, backward pass, checkpoint saving, and resume.
+Aetherion uses sparse feature computation in some experiments.
+This sentence provides another training example.
+The pipeline must run without crashing.

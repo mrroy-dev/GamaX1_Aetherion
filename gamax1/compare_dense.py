@@ -41,7 +41,7 @@ def train_pair(sparse, dense, train_data, val_data, args, device):
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-            last_losses[name] = float(loss)
+            last_losses[name] = loss.detach().item()
     return {
         "sparse": (last_losses["sparse"], evaluate(sparse, val_data, args.block_size, args.batch_size, device, args.eval_batches)),
         "dense": (last_losses["dense"], evaluate(dense, val_data, args.block_size, args.batch_size, device, args.eval_batches)),

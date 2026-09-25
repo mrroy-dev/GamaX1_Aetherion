@@ -40,11 +40,25 @@ def word_tokenizer_warning(tokenizer_type: str, token_count: int, vocab_size: in
 
 
 class CharTokenizer:
+    """Simple character-level tokenizer.
+
+    Every character in the training vocabulary maps to one token id.
+    Unlike BPE, this tokenizer does not use byte merges or special-token
+    machinery. It is intentionally simple and deterministic for baseline
+    and smoke-test training.
+    """
+
     def __init__(self, text: str = None, vocab: list = None):
         if vocab is not None:
-            self.chars = vocab
+            self.chars = list(vocab)
         else:
+            if text is None:
+                raise ValueError("text is required when vocab is not supplied")
             self.chars = sorted(set(text))
+
+        if not self.chars:
+            raise ValueError("character vocabulary cannot be empty")
+
         self.stoi = {ch: i for i, ch in enumerate(self.chars)}
         self.itos = {i: ch for i, ch in enumerate(self.chars)}
 
@@ -53,65 +67,27 @@ class CharTokenizer:
         return len(self.chars)
 
     def encode(self, text: str):
-        """Encode text while preserving literal reserved special-token markup."""
-        special_re = re.compile(
-            r"(<\|eos\|>|<\|user\|>|<\|assistant\|>|<\|pad\|>|<\|think\|>|<\|/think\|>)"
-        )
-        special_map = {
-            "<|eos|>": self.eos_id,
-            "<|user|>": self.user_id,
-            "<|assistant|>": self.assistant_id,
-            "<|pad|>": self.pad_id,
-            "<|think|>": self.think_id,
-            "<|/think|>": self.think_end_id,
-        }
-        ids = []
-        parts = special_re.split(text)
-        text_parts = [p for p in parts if p not in special_map]
-        total_chars = len(text)
-        processed_chars = 0
-        next_progress = self.progress_interval_chars
-        for part in parts:
-            if not part:
-                continue
-            if part in special_map:
-                ids.append(special_map[part])
-                processed_chars += len(part)
-                continue
-            for unit in self._pattern.findall(part):
-                b = unit.encode("utf-8")
-                i = 0
-                n = len(b)
-                while i < n:
-                    node = self._merge_trie
-                    j = i
-                    last_id = self.byte_to_id[b[i:i + 1]]
-                    last_j = i + 1
-                    while j < n:
-                        nxt = node.get(b[j])
-                        if nxt is None:
-                            break
-                        node = nxt
-                        j += 1
-                        term = node.get(-1)
-                        if term is not None:
-                            last_id = term
-                            last_j = j
-                    ids.append(last_id)
-                    i = last_j
-                processed_chars += len(unit)
-                if processed_chars >= next_progress:
-                    percent = 100.0 * processed_chars / total_chars if total_chars else 100.0
-                    print(f"Encoded {processed_chars:,} / {total_chars:,} chars ({percent:.1f}%)")
-                    next_progress += self.progress_interval_chars
-        return ids
+        """Encode each character into its vocabulary id."""
+        try:
+            return [self.stoi[ch] for ch in text]
+        except KeyError as exc:
+            ch = exc.args[0]
+            raise ValueError(
+                f"Character {ch!r} is not present in the tokenizer vocabulary"
+            ) from None
 
     def decode(self, ids):
-        return "".join(self.itos[int(i)] for i in ids)
+        """Decode token ids back into characters."""
+        try:
+            return "".join(self.itos[int(i)] for i in ids)
+        except KeyError as exc:
+            raise ValueError(
+                f"Token id {exc.args[0]} is not present in the tokenizer vocabulary"
+            ) from None
 
     def save(self, path: str):
         with open(path, "w") as f:
-            json.dump(self.chars, f)
+            json.dump(self.chars, f, ensure_ascii=False)
 
     @classmethod
     def load(cls, path: str):

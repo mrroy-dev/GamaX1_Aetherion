@@ -1,0 +1,86 @@
+# Operating system files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+Desktop.ini
+
+# Editors and IDEs
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.pid.lock
+*.seed
+*.pid
+
+# Dependencies
+node_modules/
+bower_components/
+vendor/
+
+# Build and coverage output
+dist/
+build/
+out/
+coverage/
+.nyc_output/
+.cache/
+.parcel-cache/
+.turbo/
+.next/
+.nuxt/
+.svelte-kit/
+.vite/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+ENV/
+
+# Java / Gradle
+.gradle/
+build/
+*.class
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Local databases and generated data
+*.sqlite
+*.sqlite3
+*.db
+
+# OS/package manager metadata
+.npm/
+.yarn/
+.pnp.*
+
