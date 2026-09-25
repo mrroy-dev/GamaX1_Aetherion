@@ -175,13 +175,7 @@ class ProbationaryMemoryTracker:
 
 
 def build_hex_neighbor_table(n_features: int) -> torch.Tensor:
-    """Approximate a hexagonal lattice over a 1-D feature index by
-    laying features on a square-ish grid and connecting each to its 6
-    hex-equivalent neighbors (4 axis neighbors + 2 diagonal, offset by
-    row parity -- the standard "offset coordinates" hex approximation).
-    Returns a (n_features, 6) index tensor (self-index used as padding
-    when a neighbor would fall outside the grid).
-    """
+    """Build six-neighbor indices; invalid positions use self as a gather-safe placeholder."""
     side = max(1, int(math.ceil(math.sqrt(n_features))))
     neighbors = torch.arange(n_features).unsqueeze(1).repeat(1, 6)
     for idx in range(n_features):
@@ -195,6 +189,23 @@ def build_hex_neighbor_table(n_features: int) -> torch.Tensor:
             if 0 <= nr and 0 <= nc < side and 0 <= nidx < n_features:
                 neighbors[idx, k] = nidx
     return neighbors
+
+
+def build_hex_neighbor_mask(n_features: int) -> torch.Tensor:
+    """Return True for real neighbors and False for boundary padding slots."""
+    side = max(1, int(math.ceil(math.sqrt(n_features))))
+    valid = torch.zeros((n_features, 6), dtype=torch.bool)
+    for idx in range(n_features):
+        r, c = divmod(idx, side)
+        parity = r % 2
+        offsets = [(-1, 0), (1, 0), (0, -1), (0, 1),
+                   (-1, 1 - 2 * parity), (1, 1 - 2 * parity)]
+        for k, (dr, dc) in enumerate(offsets):
+            nr, nc = r + dr, c + dc
+            nidx = nr * side + nc
+            if 0 <= nr and 0 <= nc < side and 0 <= nidx < n_features:
+                valid[idx, k] = True
+    return valid
 
 
 class HexNeighborInfluence(nn.Module):
@@ -214,14 +225,20 @@ class HexNeighborInfluence(nn.Module):
 
     def __init__(self, n_features: int, decay: float = 0.05):
         super().__init__()
-        self.register_buffer("neighbor_table", build_hex_neighbor_table(n_features))
+        table = build_hex_neighbor_table(n_features)
+        mask = build_hex_neighbor_mask(n_features)
+        self.register_buffer("neighbor_table", table)
+        self.register_buffer("neighbor_mask", mask)
         self.decay = decay
 
     def forward(self, activations: torch.Tensor) -> torch.Tensor:
-        # activations: (..., n_features)
+        # activations: (..., n_features). Self-index is only a gather-safe
+        # placeholder; invalid boundary positions are excluded from the mean.
         neighbor_vals = activations[..., self.neighbor_table]  # (..., n_features, 6)
-        influence = neighbor_vals.mean(dim=-1) * self.decay
-        return activations + influence
+        mask = self.neighbor_mask.to(dtype=activations.dtype)
+        denom = mask.sum(dim=-1).clamp_min(1.0)
+        influence = (neighbor_vals * mask).sum(dim=-1) / denom
+        return activations + influence * self.decay
 
 
 class SparseSuperpositionLinear(nn.Module):
@@ -250,7 +267,7 @@ class SparseSuperpositionLinear(nn.Module):
         if self.hex is not None:
             pre = F.relu(self.hex(pre))
 
-        k = min(k, self.n_features)
+        k = max(1, min(int(k), self.n_features))
         topk_vals, topk_idx = pre.topk(k, dim=-1)
         sparse = torch.zeros_like(pre)
         sparse.scatter_(-1, topk_idx, topk_vals)

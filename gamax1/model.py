@@ -288,6 +288,15 @@ class GamaX1Model(nn.Module):
         it receives no gradient today since its output is unused in
         `forward`/`generate`.
         """
+        if idx.ndim != 2 or idx.size(1) == 0:
+            raise ValueError("idx must have shape (batch, sequence) with a non-empty sequence")
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative")
+        if temperature <= 0:
+            raise ValueError("temperature must be > 0")
+        if top_k is not None and top_k <= 0:
+            raise ValueError("top_k must be positive when provided")
+
         self.eval()
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.max_seq_len:]
@@ -309,7 +318,7 @@ class GamaX1Model(nn.Module):
                 logits, _ = self.forward(idx_cond, k=k, use_ptm=False)
                 logits = logits[:, -1, :]
 
-            logits = logits / max(temperature, 1e-6)
+            logits = logits / temperature
             if repetition_penalty != 1.0:
                 # Per-row mask: (batch, vocab), True where THAT row's own
                 # sequence-so-far contains the token -- not just row 0's,

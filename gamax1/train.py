@@ -2,6 +2,8 @@
 
 import argparse
 from dataclasses import dataclass
+import hashlib
+import json
 import math
 import os
 import time
@@ -427,13 +429,48 @@ def main():
         if args.tokenizer == "bpe":
             data_path = os.path.abspath(args.data)
             cache_path = f"{data_path}.bpe{args.bpe_vocab_size}.encoded.pt"
-            if os.path.exists(cache_path):
-                data = torch.load(cache_path, map_location="cpu")
-                print(f"Using cached BPE encoding: {cache_path}")
+            meta_path = cache_path + ".meta.json"
+            # A token cache is only valid for the exact source text and exact
+            # tokenizer implementation/merge set. The old cache key used only
+            # path+vocab size, so changing tokenizer code could silently reuse
+            # stale token IDs.
+            source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            tokenizer_hash = hashlib.sha256(
+                json.dumps([list(m) for m in tok.merges], separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            expected_meta = {
+                "cache_version": 2,
+                "source_sha256": source_hash,
+                "tokenizer_merges_sha256": tokenizer_hash,
+                "vocab_size": tok.vocab_size,
+                "bpe_vocab_size": args.bpe_vocab_size,
+            }
+            use_cache = False
+            if os.path.exists(cache_path) and os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        cached_meta = json.load(f)
+                    use_cache = cached_meta == expected_meta
+                except (OSError, ValueError, TypeError):
+                    use_cache = False
+            if use_cache:
+                data = torch.load(cache_path, map_location="cpu", weights_only=True)
+                if not isinstance(data, torch.Tensor) or data.ndim != 1 or data.dtype != torch.long:
+                    use_cache = False
+                elif data.numel() and (int(data.min()) < 0 or int(data.max()) >= tok.vocab_size):
+                    use_cache = False
+            if use_cache:
+                print(f"Using validated BPE encoding cache: {cache_path}")
             else:
                 data = torch.tensor(tok.encode(text), dtype=torch.long)
-                torch.save(data, cache_path)
-                print(f"Performed fresh BPE encode and cached it at: {cache_path}")
+                tmp_cache = cache_path + ".tmp"
+                tmp_meta = meta_path + ".tmp"
+                torch.save(data, tmp_cache)
+                with open(tmp_meta, "w", encoding="utf-8") as f:
+                    json.dump(expected_meta, f, indent=2, sort_keys=True)
+                os.replace(tmp_cache, cache_path)
+                os.replace(tmp_meta, meta_path)
+                print(f"Performed fresh BPE encode and rebuilt cache: {cache_path}")
         else:
             data = torch.tensor(tok.encode(text), dtype=torch.long)
         corpus_description = f"{len(text):,} chars"

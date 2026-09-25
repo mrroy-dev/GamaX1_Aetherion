@@ -53,7 +53,58 @@ class CharTokenizer:
         return len(self.chars)
 
     def encode(self, text: str):
-        return [self.stoi[c] for c in text if c in self.stoi]
+        """Encode text while preserving literal reserved special-token markup."""
+        special_re = re.compile(
+            r"(<\|eos\|>|<\|user\|>|<\|assistant\|>|<\|pad\|>|<\|think\|>|<\|/think\|>)"
+        )
+        special_map = {
+            "<|eos|>": self.eos_id,
+            "<|user|>": self.user_id,
+            "<|assistant|>": self.assistant_id,
+            "<|pad|>": self.pad_id,
+            "<|think|>": self.think_id,
+            "<|/think|>": self.think_end_id,
+        }
+        ids = []
+        parts = special_re.split(text)
+        text_parts = [p for p in parts if p not in special_map]
+        total_chars = len(text)
+        processed_chars = 0
+        next_progress = self.progress_interval_chars
+        for part in parts:
+            if not part:
+                continue
+            if part in special_map:
+                ids.append(special_map[part])
+                processed_chars += len(part)
+                continue
+            for unit in self._pattern.findall(part):
+                b = unit.encode("utf-8")
+                i = 0
+                n = len(b)
+                while i < n:
+                    node = self._merge_trie
+                    j = i
+                    last_id = self.byte_to_id[b[i:i + 1]]
+                    last_j = i + 1
+                    while j < n:
+                        nxt = node.get(b[j])
+                        if nxt is None:
+                            break
+                        node = nxt
+                        j += 1
+                        term = node.get(-1)
+                        if term is not None:
+                            last_id = term
+                            last_j = j
+                    ids.append(last_id)
+                    i = last_j
+                processed_chars += len(unit)
+                if processed_chars >= next_progress:
+                    percent = 100.0 * processed_chars / total_chars if total_chars else 100.0
+                    print(f"Encoded {processed_chars:,} / {total_chars:,} chars ({percent:.1f}%)")
+                    next_progress += self.progress_interval_chars
+        return ids
 
     def decode(self, ids):
         return "".join(self.itos[int(i)] for i in ids)
@@ -160,7 +211,7 @@ class BPETokenizer:
     a deliberate speed/quality trade-off.
     """
 
-    _pattern = re.compile(r"\s*\w+|\s+|[^\w\s]+", re.UNICODE)
+    _pattern = re.compile(r"\s*\d|\s*[^\W\d]+|\s+|[^\w\s]+", re.UNICODE)
     min_pair_count = 2
     progress_interval_chars = 50_000_000
 
@@ -210,9 +261,14 @@ class BPETokenizer:
             pair = None
             while heap:
                 neg_count, candidate = heapq.heappop(heap)
-                if counts.get(candidate, 0) == -neg_count:
-                    pair = candidate
+                current = counts.get(candidate, 0)
+                if current != -neg_count:
+                    continue  # stale heap entry
+                if current < self.min_pair_count:
+                    pair = None
                     break
+                pair = candidate
+                break
             if pair is None:
                 break
             a, b = pair
@@ -356,6 +412,28 @@ class BPETokenizer:
 
     def encode(self, text: str):
         ids = []
+        processed_chars = 0
+        # Reserved markup is converted only when it appears literally and
+        # exactly; ordinary text continues through the byte-BPE path.
+        special_re = re.compile(r"(<\|eos\|>|<\|user\|>|<\|assistant\|>|<\|pad\|>|<\|think\|>|<\|/think\|>)")
+        special_map = {
+            "<|eos|>": self.eos_id,
+            "<|user|>": self.user_id,
+            "<|assistant|>": self.assistant_id,
+            "<|pad|>": self.pad_id,
+            "<|think|>": self.think_id,
+            "<|/think|>": self.think_end_id,
+        }
+        segments = special_re.split(text)
+        text_segments = []
+        for segment in segments:
+            if segment in special_map:
+                ids.append(special_map[segment])
+            elif segment:
+                text_segments.append(segment)
+        if len(segments) > 1:
+            text = "".join(text_segments)
+
         processed_chars = 0
         next_progress = self.progress_interval_chars
         total_chars = len(text)

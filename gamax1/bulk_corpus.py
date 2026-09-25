@@ -33,6 +33,7 @@ file instead of starting the batch over.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import mmap
 import os
@@ -52,6 +53,7 @@ DATASETS = {
     "books_cleaned_v1": "/content/drive/MyDrive/Aetherion_GamaX1/data/books_cleaned_v1",
     "Math_Reasoning_train": "/content/drive/MyDrive/Aetherion_GamaX1/data/Math_Reasoning/train/books",
     "Conversations-200k_clean": "/content/drive/MyDrive/Aetherion_GamaX1/data/Conversations-200k_clean",
+    "Q&A": "/content/drive/MyDrive/Aetherion_GamaX1/data/QnA",
 }
 
 DEFAULT_SOURCE_DIRS = DATASETS
@@ -100,11 +102,13 @@ DEFAULT_SOURCE_DIRS = DATASETS
 SOURCE_FORMAT_PROSE = "prose"
 SOURCE_FORMAT_USER_ASSISTANT = "user_assistant"
 SOURCE_FORMAT_GENERIC_TURNS = "generic_turns"
+CORPUS_FORMAT_VERSION = "v4-schema-aware-json-fingerprint"
 
 DEFAULT_SOURCE_FORMATS = {
     "books_cleaned_v1": SOURCE_FORMAT_PROSE,
-    "Math_Reasoning_train": SOURCE_FORMAT_PROSE,
+    "Math_Reasoning_train": SOURCE_FORMAT_USER_ASSISTANT,
     "Conversations-200k_clean": SOURCE_FORMAT_USER_ASSISTANT,
+    "Q&A": SOURCE_FORMAT_USER_ASSISTANT,
 }
 
 _unknown_source_format_warned: set[str] = set()
@@ -170,6 +174,143 @@ def _split_on_separator(text: str) -> list[str]:
     return [p for p in parts if p]
 
 
+
+def _json_records(raw_text: str, suffix: str) -> list[dict]:
+    """Parse JSON/JSONL objects conservatively and tolerate common wrappers."""
+    records: list[dict] = []
+    if suffix.lower() == ".jsonl":
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                records.append(obj)
+            elif isinstance(obj, list):
+                records.extend(x for x in obj if isinstance(x, dict))
+        return records
+
+    try:
+        obj = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(obj, dict):
+        # Common dataset wrappers: {"data": [...]} / {"examples": [...]} etc.
+        for key in ("data", "records", "examples", "items", "rows"):
+            value = obj.get(key)
+            if isinstance(value, list) and all(isinstance(x, dict) for x in value):
+                return value
+        return [obj]
+    if isinstance(obj, list):
+        return [x for x in obj if isinstance(x, dict)]
+    return []
+
+
+def _content_to_text(content) -> str:
+    """Normalize string or common multimodal-content representations."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _message_pairs_from_record(record: dict) -> list[tuple[str, str]]:
+    """Extract user/assistant pairs from common conversation/Q&A schemas."""
+    messages = record.get("messages")
+    if isinstance(messages, list):
+        pairs: list[tuple[str, str]] = []
+        pending_user: str | None = None
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role", "")).strip().lower()
+            content = _content_to_text(message.get("content", ""))
+            if not content:
+                continue
+            if role in {"user", "human", "question"}:
+                pending_user = content
+            elif role in {"assistant", "bot", "answer", "gpt", "model"} and pending_user is not None:
+                pairs.append((pending_user, content))
+                pending_user = None
+        if pairs:
+            return pairs
+
+    # Common single-turn Q&A schemas, including Johnson-style datasets.
+    user_keys = ("question", "prompt", "query", "instruction", "input", "user", "human")
+    assistant_keys = ("answer", "response", "output", "completion", "assistant", "bot", "target")
+    user_text = next((_content_to_text(record.get(k)) for k in user_keys if _content_to_text(record.get(k))), "")
+    assistant_text = next((_content_to_text(record.get(k)) for k in assistant_keys if _content_to_text(record.get(k))), "")
+    if user_text and assistant_text:
+        return [(user_text, assistant_text)]
+
+    # Some datasets store an explicit two-turn list under conversation/dialog.
+    for key in ("conversation", "dialog", "dialogue", "turns"):
+        turns = record.get(key)
+        if not isinstance(turns, list):
+            continue
+        pending_user = None
+        pairs = []
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            role = str(turn.get("role", turn.get("speaker", ""))).strip().lower()
+            content = _content_to_text(turn.get("content", turn.get("text", turn.get("value", ""))))
+            if not content:
+                continue
+            if role in {"user", "human", "question"}:
+                pending_user = content
+            elif role in {"assistant", "bot", "answer", "model", "gpt"} and pending_user is not None:
+                pairs.append((pending_user, content))
+                pending_user = None
+        if pairs:
+            return pairs
+    return []
+
+
+def _extract_json_training_text(raw_text: str, suffix: str) -> list[str]:
+    """Extract actual textual training content for BPE sampling."""
+    chunks: list[str] = []
+    for record in _json_records(raw_text, suffix):
+        pairs = _message_pairs_from_record(record)
+        if pairs:
+            for user_text, assistant_text in pairs:
+                chunks.extend((user_text, assistant_text))
+            continue
+        # For prose-like JSON records, use explicit text/content fields only.
+        for key in ("text", "content", "document", "body"):
+            value = _content_to_text(record.get(key))
+            if value:
+                chunks.append(value)
+                break
+    return chunks
+
+
+def _encode_json_messages(tokenizer: BPETokenizer, raw_text: str, suffix: str) -> list[int]:
+    """Encode JSON/JSONL Q&A records as reserved user/assistant role tokens."""
+    ids: list[int] = []
+    for record in _json_records(raw_text, suffix):
+        for user_text, assistant_text in _message_pairs_from_record(record):
+            if ids:
+                ids.append(tokenizer.eos_id)
+            ids.append(tokenizer.user_id)
+            ids.extend(tokenizer.encode(user_text))
+            ids.append(tokenizer.assistant_id)
+            ids.extend(tokenizer.encode(assistant_text))
+    return ids
+
+
 def _encode_user_assistant_block(tokenizer: BPETokenizer, block: str) -> list[int]:
     """Encode one exchange, replacing literal "User:"/"Assistant:" labels
     with the tokenizer's dedicated role ids. Falls back to plain prose
@@ -193,7 +334,7 @@ def _encode_user_assistant_block(tokenizer: BPETokenizer, block: str) -> list[in
 
 def _encode_source_file(
     tokenizer: BPETokenizer, source_name: str, raw_text: str, source_formats: dict,
-    is_first_emission: bool,
+    is_first_emission: bool, suffix: str = "",
 ) -> tuple[list[int], bool]:
     """Encode one file's text according to its source's content format.
 
@@ -218,8 +359,13 @@ def _encode_source_file(
     if fmt == SOURCE_FORMAT_PROSE:
         emit(tokenizer.encode(_strip_gutenberg_boilerplate(raw_text)))
     elif fmt == SOURCE_FORMAT_USER_ASSISTANT:
-        for block in (_split_on_separator(raw_text) or [raw_text]):
-            emit(_encode_user_assistant_block(tokenizer, block))
+        if suffix.lower() in {".json", ".jsonl"}:
+            json_ids = _encode_json_messages(tokenizer, raw_text, suffix)
+            if json_ids:
+                emit(json_ids)
+        else:
+            for block in (_split_on_separator(raw_text) or [raw_text]):
+                emit(_encode_user_assistant_block(tokenizer, block))
     elif fmt == SOURCE_FORMAT_GENERIC_TURNS:
         for block in (_split_on_separator(raw_text) or [raw_text]):
             emit(tokenizer.encode(block))
@@ -326,19 +472,35 @@ def _collect_source_paths(data_dir: str | Path, source_dirs=DEFAULT_SOURCE_DIRS)
     for name, source_path in candidates:
         if not source_path.is_dir():
             continue
-        paths = sorted((p for p in source_path.rglob("*.txt") if p.is_file()), key=lambda p: str(p))
+        allowed_suffixes = {".txt", ".json", ".jsonl"}
+        paths = sorted(
+            (
+                p for p in source_path.rglob("*")
+                if p.is_file() and p.suffix.lower() in allowed_suffixes
+            ),
+            key=lambda p: str(p),
+        )
         if paths:
             sources[name] = paths
 
     if not sources:
         root = Path(data_dir)
         if root.is_dir():
-            flat_paths = sorted((p for p in root.rglob("*.txt") if p.is_file()), key=lambda p: str(p))
+            allowed_suffixes = {".txt", ".json", ".jsonl"}
+            flat_paths = sorted(
+                (
+                    p for p in root.rglob("*")
+                    if p.is_file() and p.suffix.lower() in allowed_suffixes
+                ),
+                key=lambda p: str(p),
+            )
             if flat_paths:
                 sources["books"] = flat_paths
 
     if not sources:
-        raise ValueError(f"no .txt files found for configured sources: {candidates}")
+        raise ValueError(
+            f"no supported source files (.txt/.json/.jsonl) found: {candidates}"
+        )
     return sources
 
 
@@ -357,23 +519,46 @@ def book_paths(data_dir: str | Path) -> list[Path]:
 
 
 def sample_book_text(paths: list[Path], sample_chars: int) -> str:
-    """Read at most ``sample_chars`` across the given files for BPE training."""
+    """Read actual textual content, not raw JSON syntax, for BPE training."""
     if sample_chars <= 0:
         raise ValueError("sample_chars must be positive")
-    pieces = []
+    pieces: list[str] = []
     remaining = sample_chars
     for path in paths:
         if remaining <= 0:
             break
         with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            text = handle.read(remaining)
+            raw = handle.read(remaining * 2 if path.suffix.lower() in {".json", ".jsonl"} else remaining)
+        if path.suffix.lower() in {".json", ".jsonl"}:
+            extracted = _extract_json_training_text(raw, path.suffix)
+            text = "\n\n".join(extracted)
+        else:
+            text = raw
         if text:
+            text = text[:remaining]
             pieces.append(text)
             remaining -= len(text)
     sample = "\n\n".join(pieces)
     if not sample.strip():
-        raise ValueError("input files contain no readable text")
+        raise ValueError("input files contain no readable training text")
     return sample
+
+
+def _file_stat(path: Path) -> dict:
+    """Return a stable content fingerprint without hashing entire huge files."""
+    stat = path.stat()
+    h = hashlib.blake2b(digest_size=16)
+    with path.open("rb") as f:
+        head = f.read(65536)
+        if stat.st_size > 131072:
+            f.seek(max(0, stat.st_size - 65536))
+            tail = f.read(65536)
+        else:
+            tail = b""
+    h.update(head)
+    h.update(tail)
+    h.update(str(stat.st_size).encode())
+    return {"size": stat.st_size, "fingerprint": h.hexdigest()}
 
 
 def _file_stat(path: Path) -> dict:
@@ -509,12 +694,14 @@ def _load_or_create_persistent_bpe(
                 loaded = BPETokenizer.load(path)
                 if loaded.merges != supplied.merges:
                     raise ValueError(
-                        "The supplied checkpoint tokenizer differs from the "
-                        "tokenizer stored in the bulk cache. Delete/rebuild the "
-                        "cache only if you intentionally changed the tokenizer."
+                        "Supplied checkpoint tokenizer differs from the tokenizer "
+                        "stored in the bulk cache. Use the cache tokenizer or explicitly "
+                        "rebuild the corpus cache with a new cache directory."
                     )
                 return loaded
-            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            except ValueError:
+                raise
+            except (OSError, KeyError, json.JSONDecodeError):
                 pass
         payload = {"merges": [list(pair) for pair in supplied.merges]}
         _atomic_write_text(path, json.dumps(payload, indent=2))
@@ -613,10 +800,12 @@ def build_or_load_bulk_tokens(
         "tokenizer": "bpe",
         "vocab_size": tokenizer.vocab_size,
         "merges": [list(pair) for pair in tokenizer.merges],
+        "corpus_format_version": CORPUS_FORMAT_VERSION,
+        "source_formats": dict(sorted(source_formats.items())),
     }
 
     if rebuild:
-        # Explicit rebuild is also non-destructive: quarantine old artifacts
+        # Explicit rebuild is non-destructive: quarantine old artifacts
         # instead of deleting them.
         for path in (token_path, _file_index_path(cache), progress_path):
             _quarantine_file(path, "explicit_rebuild")
@@ -624,10 +813,14 @@ def build_or_load_bulk_tokens(
     else:
         file_index = _load_file_index(cache, tokenizer_expected)
 
-    # If the cache index belongs to another tokenizer, it cannot be reused.
-    # With the persistent tokenizer this should only happen after an explicit
-    # tokenizer/cache mismatch or a manually altered cache.
+    # An invalid/missing index means the existing binary cannot be trusted.
+    # NEVER append to it: that would mix token IDs from different corpus/parser
+    # identities. Quarantine the binary and start a clean stream.
     if file_index is None:
+        if token_path.exists():
+            _quarantine_file(token_path, "cache_identity_changed")
+        if progress_path.exists():
+            _quarantine_file(progress_path, "cache_identity_changed")
         files_record: dict[str, dict] = {}
         base_token_count = 0
     else:
@@ -640,7 +833,7 @@ def build_or_load_bulk_tokens(
         changed = [
             key for key, record in files_record.items()
             if key not in current_keys or
-            _file_stat(Path(key))["size"] != record["size"]
+            _file_stat(Path(key)) != {k: record.get(k) for k in ("size", "fingerprint")}
         ]
         if changed:
             print(
@@ -659,7 +852,7 @@ def build_or_load_bulk_tokens(
         key = str(path)
         stat = _file_stat(path)
         recorded = files_record.get(key)
-        if recorded is None or recorded["size"] != stat["size"]:
+        if recorded is None or any(recorded.get(k) != stat.get(k) for k in ("size", "fingerprint")):
             to_encode.append(path)
 
     token_count = base_token_count
@@ -737,7 +930,8 @@ def build_or_load_bulk_tokens(
 
                 source_name = path_to_source[str(path)]
                 encoded, is_first_emission = _encode_source_file(
-                    tokenizer, source_name, raw_text, source_formats, is_first_emission
+                    tokenizer, source_name, raw_text, source_formats,
+                    is_first_emission, path.suffix
                 )
 
                 values = array("I", encoded)
@@ -748,6 +942,7 @@ def build_or_load_bulk_tokens(
                 files_record[key] = {
                     "source": path_to_source[key],
                     "size": stat["size"],
+                    "fingerprint": stat["fingerprint"],
                     "token_start": token_count,
                     "token_count": len(encoded),
                 }

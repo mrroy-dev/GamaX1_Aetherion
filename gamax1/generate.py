@@ -74,18 +74,29 @@ def main():
                               "Only meaningful for a checkpoint trained on the role-tagged "
                               "corpus format (bulk_corpus.py's user_assistant source format); "
                               "on any other checkpoint the model was never shown these ids "
-                              "and this will not produce a sensible reply. Implies "
-                              "--stop_at_eos unless explicitly disabled.")
+                              "and this will not produce a sensible reply. Use "
+                              "--stop_at_eos explicitly when the training data contains EOS turn boundaries.")
     parser.add_argument("--no_stop_at_eos", action="store_true",
                          help="With --chat, generate the full --max_new_tokens instead of "
                               "stopping at the assistant turn's eos_id.")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
+    if args.max_new_tokens <= 0:
+        parser.error("--max_new_tokens must be > 0")
+    if args.temperature <= 0:
+        parser.error("--temperature must be > 0")
+    if args.top_k < 0:
+        parser.error("--top_k must be >= 0")
+    if args.repetition_penalty <= 0:
+        parser.error("--repetition_penalty must be > 0")
+    if args.no_stop_at_eos and not args.chat and not args.stop_at_eos:
+        parser.error("--no_stop_at_eos is only meaningful with --chat")
+
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     model, tok = load_model(args.ckpt, device)
 
-    stop_at_eos = args.stop_at_eos or (args.chat and not args.no_stop_at_eos)
+    stop_at_eos = args.stop_at_eos and not args.no_stop_at_eos
     eos_id = tok.eos_id if (stop_at_eos and hasattr(tok, "eos_id")) else None
 
     if args.chat:
