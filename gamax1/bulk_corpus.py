@@ -33,7 +33,6 @@ file instead of starting the batch over.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import mmap
 import os
@@ -102,7 +101,7 @@ DEFAULT_SOURCE_DIRS = DATASETS
 SOURCE_FORMAT_PROSE = "prose"
 SOURCE_FORMAT_USER_ASSISTANT = "user_assistant"
 SOURCE_FORMAT_GENERIC_TURNS = "generic_turns"
-CORPUS_FORMAT_VERSION = "v4-schema-aware-json-fingerprint"
+CORPUS_FORMAT_VERSION = "v4-schema-aware-json-size-check"
 
 DEFAULT_SOURCE_FORMATS = {
     "books_cleaned_v1": SOURCE_FORMAT_PROSE,
@@ -557,23 +556,6 @@ def sample_book_text(paths: list[Path], sample_chars: int) -> str:
 
 
 def _file_stat(path: Path) -> dict:
-    """Return a stable content fingerprint without hashing entire huge files."""
-    stat = path.stat()
-    h = hashlib.blake2b(digest_size=16)
-    with path.open("rb") as f:
-        head = f.read(65536)
-        if stat.st_size > 131072:
-            f.seek(max(0, stat.st_size - 65536))
-            tail = f.read(65536)
-        else:
-            tail = b""
-    h.update(head)
-    h.update(tail)
-    h.update(str(stat.st_size).encode())
-    return {"size": stat.st_size, "fingerprint": h.hexdigest()}
-
-
-def _file_stat(path: Path) -> dict:
     """Cheap identity check for a source file: size only.
 
     mtime is deliberately NOT used here. Google Drive's FUSE mount does not
@@ -848,7 +830,7 @@ def build_or_load_bulk_tokens(
         changed = [
             key for key, record in files_record.items()
             if key not in current_keys or
-            _file_stat(Path(key)) != {k: record.get(k) for k in ("size", "fingerprint")}
+            _file_stat(Path(key)).get("size") != record.get("size")
         ]
         if changed:
             print(
@@ -867,7 +849,7 @@ def build_or_load_bulk_tokens(
         key = str(path)
         stat = _file_stat(path)
         recorded = files_record.get(key)
-        if recorded is None or any(recorded.get(k) != stat.get(k) for k in ("size", "fingerprint")):
+        if recorded is None or recorded.get("size") != stat.get("size"):
             to_encode.append(path)
 
     token_count = base_token_count
@@ -968,7 +950,6 @@ def build_or_load_bulk_tokens(
                 files_record[key] = {
                     "source": path_to_source[key],
                     "size": stat["size"],
-                    "fingerprint": stat["fingerprint"],
                     "token_start": token_count,
                     "token_count": len(encoded),
                 }
@@ -977,6 +958,28 @@ def build_or_load_bulk_tokens(
                 if index % ENCODE_CHECKPOINT_EVERY == 0 or index == len(to_encode):
                     output.flush()
                     os.fsync(output.fileno())
+
+                    # Timing must be computed BEFORE the progress-JSON write below,
+                    # since that write embeds interval_elapsed/files_per_sec/eta_sec.
+                    # (A prior version of this block referenced these variables in
+                    # the JSON dump before they were assigned, which raised
+                    # UnboundLocalError on the very first checkpoint of any run.)
+                    now = time.monotonic()
+                    interval_files = index - last_progress_index
+                    interval_tokens = token_count - last_progress_token_count
+                    interval_elapsed = now - last_progress_time
+                    run_elapsed = now - encode_run_start_time
+                    files_per_sec = (
+                        interval_files / interval_elapsed
+                        if interval_elapsed > 0 else 0.0
+                    )
+                    tokens_per_sec = (
+                        interval_tokens / interval_elapsed
+                        if interval_elapsed > 0 else 0.0
+                    )
+                    remaining_files = max(0, len(to_encode) - index)
+                    eta_sec = (remaining_files / files_per_sec) if files_per_sec > 0 else None
+
                     _atomic_write_text(
                         progress_path,
                         json.dumps(
@@ -997,21 +1000,6 @@ def build_or_load_bulk_tokens(
                         encoding="utf-8",
                     )
 
-                    now = time.monotonic()
-                    interval_files = index - last_progress_index
-                    interval_tokens = token_count - last_progress_token_count
-                    interval_elapsed = now - last_progress_time
-                    run_elapsed = now - encode_run_start_time
-                    files_per_sec = (
-                        interval_files / interval_elapsed
-                        if interval_elapsed > 0 else 0.0
-                    )
-                    tokens_per_sec = (
-                        interval_tokens / interval_elapsed
-                        if interval_elapsed > 0 else 0.0
-                    )
-                    remaining_files = max(0, len(to_encode) - index)
-                    eta_sec = (remaining_files / files_per_sec) if files_per_sec > 0 else None
                     timing_record = {
                         "timestamp": time.time(), "checkpoint_files": index,
                         "interval_files": interval_files, "interval_sec": interval_elapsed,
