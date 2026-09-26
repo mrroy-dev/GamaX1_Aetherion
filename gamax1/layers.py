@@ -52,7 +52,12 @@ class DynamicSparsityController:
         self._steps_since_change = 0
 
     def step(self, loss_value: float):
-        """Call once per training step with the current scalar loss."""
+        """Call once per training step with the current scalar loss.
+
+        The controller treats k_max as a true mathematical upper bound even
+        when loading a checkpoint produced by an older implementation.
+        """
+        self.k = max(self.k_min, min(self.k_max, int(self.k)))
         self._loss_history.append(float(loss_value))
         self._loss_history = self._loss_history[-(self.trend_window * 3):]
         self._steps_since_change += 1
@@ -80,7 +85,7 @@ class DynamicSparsityController:
         }
 
     def load_state_dict(self, state):
-        self.k = state["k"]
+        self.k = max(self.k_min, min(self.k_max, int(state["k"])))
         self.exploration_fraction = state["exploration_fraction"]
         # .get() with a safe default: an older checkpoint saved before this
         # fix won't have these two keys. Resume still works, just without

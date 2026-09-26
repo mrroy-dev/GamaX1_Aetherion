@@ -376,7 +376,19 @@ def _encode_source_file(
 
 
 # Write a progress checkpoint every this many files during encoding.
-PROGRESS_INTERVAL = 500
+# Corpus encoding checkpoint frequency.
+#
+# Why 500? Encoding thousands of files can take a long time on a Drive-mounted
+# Colab filesystem. Every 500 completed files we flush the token stream and
+# write `encode_progress.json`. If Colab disconnects after that point, the next
+# run can resume instead of starting the whole corpus again.
+#
+# This is a FILE checkpoint, not a neural-network training checkpoint.
+ENCODE_CHECKPOINT_EVERY = 500
+
+# Backwards-compatible name used by older notebook/debugging code. Keeping the
+# alias avoids breaking a cell that still prints or inspects PROGRESS_INTERVAL.
+PROGRESS_INTERVAL = ENCODE_CHECKPOINT_EVERY
 
 # Every this many files, force an OS-level fsync (not just a Python-level
 # flush) and pause briefly while checking that the on-disk file size has
@@ -586,6 +598,9 @@ def _file_index_path(cache_dir: Path) -> Path:
 
 def _progress_path(cache_dir: Path) -> Path:
     return cache_dir / "encode_progress.json"
+
+def _encoding_timing_path(cache_dir: Path) -> Path:
+    return cache_dir / "encoding_checkpoint_timing.jsonl"
 
 
 def _load_file_index(cache_dir: Path, tokenizer_expected: dict) -> Optional[dict]:
@@ -914,6 +929,17 @@ def build_or_load_bulk_tokens(
             last_progress_time = encode_run_start_time
             last_progress_index = start_index
             last_progress_token_count = token_count
+            timing_path = _encoding_timing_path(cache)
+            # Timing is append-only and survives disconnects. A resumed run
+            # starts a new timing interval from its current checkpoint; it never
+            # fabricates the time spent before the runtime disappeared.
+            timing_records = []
+            if timing_path.exists():
+                for line in timing_path.read_text(encoding="utf-8").splitlines()[-20:]:
+                    try: timing_records.append(json.loads(line))
+                    except Exception: pass
+            previous_checkpoint_time = None
+            previous_checkpoint_index = start_index
             # Tracks whether the very next emitted block (file, or
             # "---"-separated sub-block within a file) needs a leading
             # eos_id. False only for the very first block of the entire
@@ -948,7 +974,7 @@ def build_or_load_bulk_tokens(
                 }
                 token_count += len(encoded)
 
-                if index % PROGRESS_INTERVAL == 0 or index == len(to_encode):
+                if index % ENCODE_CHECKPOINT_EVERY == 0 or index == len(to_encode):
                     output.flush()
                     os.fsync(output.fileno())
                     _atomic_write_text(
@@ -961,6 +987,10 @@ def build_or_load_bulk_tokens(
                                 "files_done": index,
                                 "token_count": token_count,
                                 "files_record": files_record,
+                                "last_checkpoint_wall_time": time.time(),
+                                "last_checkpoint_interval_sec": interval_elapsed,
+                                "last_checkpoint_files_per_sec": files_per_sec,
+                                "eta_seconds_to_batch_end": eta_sec,
                             },
                             indent=2,
                         ),
@@ -980,6 +1010,17 @@ def build_or_load_bulk_tokens(
                         interval_tokens / interval_elapsed
                         if interval_elapsed > 0 else 0.0
                     )
+                    remaining_files = max(0, len(to_encode) - index)
+                    eta_sec = (remaining_files / files_per_sec) if files_per_sec > 0 else None
+                    timing_record = {
+                        "timestamp": time.time(), "checkpoint_files": index,
+                        "interval_files": interval_files, "interval_sec": interval_elapsed,
+                        "files_per_sec": files_per_sec, "tokens_per_sec": tokens_per_sec,
+                        "eta_seconds_to_batch_end": eta_sec,
+                        "estimated_batch_end_unix": (time.time()+eta_sec if eta_sec is not None else None),
+                    }
+                    with timing_path.open("a", encoding="utf-8") as tf:
+                        tf.write(json.dumps(timing_record, sort_keys=True) + "\n")
                     print(
                         f"Encoded {index:,}/{len(to_encode):,} new files "
                         f"| {token_count:,} tokens total "

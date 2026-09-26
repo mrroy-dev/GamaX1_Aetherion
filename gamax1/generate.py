@@ -111,9 +111,14 @@ def main():
         prompt_ids = tok.encode(args.prompt)
 
     idx = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+    # The prompt length is the boundary between user-provided context and the
+    # model's own answer. Passing it into generate() makes repetition penalty
+    # affect only generated tokens, not words that happened to occur in the
+    # user's question.
     out = model.generate(
         idx, max_new_tokens=args.max_new_tokens, temperature=args.temperature,
         top_k=args.top_k, repetition_penalty=args.repetition_penalty,
+        repetition_penalty_start=idx.size(1),
         use_hierarchical_exit=args.hierarchical_exit, eos_id=eos_id,
     )
     if args.chat:

@@ -262,7 +262,7 @@ class GamaX1Model(nn.Module):
     @torch.no_grad()
     def generate(self, idx, max_new_tokens: int, temperature: float = 1.0, top_k: int = None,
                  repetition_penalty: float = 1.0, use_hierarchical_exit: bool = False,
-                 eos_id: int = None):
+                 eos_id: int = None, repetition_penalty_start: int = 0):
         """Autoregressive sampling. If use_hierarchical_exit, the Validator
         (Section 5.6/5.11) decides per step whether the stack of blocks
         processed so far is already stable, exiting early instead of always
@@ -281,6 +281,14 @@ class GamaX1Model(nn.Module):
         batch>1, where sequences could finish at different steps and
         per-sequence stopping isn't implemented here.
 
+        ``repetition_penalty_start`` marks the first token that belongs to the
+        generated continuation. Tokens before this position are prompt/context
+        and are intentionally excluded from the repetition mask. This matters
+        for chat generation: a word appearing in the user's question should
+        not become artificially "expensive" just because it appeared in the
+        prompt. The default 0 preserves the historical full-sequence behavior
+        for callers that do not provide a boundary.
+
         Note: `self.router` (RouterExpert) is constructed but not currently
         consulted here -- exit is decided purely by the Validator's
         stability check. Router is a reserved hook for a future trained
@@ -296,6 +304,11 @@ class GamaX1Model(nn.Module):
             raise ValueError("temperature must be > 0")
         if top_k is not None and top_k <= 0:
             raise ValueError("top_k must be positive when provided")
+        if not 0 <= repetition_penalty_start <= idx.size(1):
+            raise ValueError(
+                "repetition_penalty_start must be between 0 and the initial "
+                "prompt length"
+            )
 
         self.eval()
         for _ in range(max_new_tokens):
@@ -325,8 +338,15 @@ class GamaX1Model(nn.Module):
                 # so batched generation penalizes each sequence by its own
                 # history (previously all rows were penalized using only
                 # sequence 0's tokens).
-                present = torch.zeros(idx.size(0), logits.shape[-1], dtype=torch.bool, device=logits.device)
-                present.scatter_(1, idx, True)
+                # Only generated tokens participate in the penalty. The
+                # prompt remains pure context. At the first generation step
+                # this slice is empty, which means no prompt token is penalized.
+                generated_history = idx[:, repetition_penalty_start:]
+                present = torch.zeros(
+                    idx.size(0), logits.shape[-1], dtype=torch.bool, device=logits.device
+                )
+                if generated_history.size(1) > 0:
+                    present.scatter_(1, generated_history, True)
                 logits = apply_repetition_penalty(logits, present, float(repetition_penalty))
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))

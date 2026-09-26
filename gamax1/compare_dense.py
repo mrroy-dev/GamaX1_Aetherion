@@ -107,3 +107,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# The printed table remains the human-readable result; JSON output is written by the run
+# command only when --output is supplied in future versions. Keep this script free of
+# benchmark claims: it reports measured sparse/dense values only.

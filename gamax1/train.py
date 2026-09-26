@@ -13,6 +13,7 @@ import torch
 from .model import GamaX1Model
 from .tokenizer import BPETokenizer, CharTokenizer, WordTokenizer, word_tokenizer_warning
 from .bulk_corpus import build_or_load_bulk_tokens
+from .experiment_tracker import ExperimentTracker
 
 
 def perplexity(loss: float) -> float:
@@ -335,10 +336,18 @@ def main():
     parser.add_argument("--perplexity_memorization_floor", type=float, default=1.5,
                         help="Flag low-capacity-ratio runs when train or validation perplexity falls below this value (default: 1.5).")
     parser.add_argument("--early_stop_on_overfit", action="store_true")
-    parser.add_argument("--checkpoint_interval", type=int, default=100,
-                        help="Save a resumable latest checkpoint every N steps (default: 100).")
+    # Neural-network training checkpoint frequency. This is deliberately
+    # separate from bulk_corpus.py's 500-FILE encoding checkpoint. At every
+    # 500 optimizer steps we save both a numbered checkpoint (for history)
+    # and `gamax1_latest.pt` (for automatic resume after Colab disconnects).
+    parser.add_argument("--checkpoint_interval", type=int, default=500,
+                        help="Save a resumable training checkpoint every N steps (default: 500).")
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Checkpoint to resume. If omitted, automatically resumes checkpoints/gamax1_latest.pt when present.")
+    parser.add_argument("--experiment_dir", type=str, default="experiments",
+                        help="Directory containing one persistent subdirectory per training run.")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="Optional explicit experiment run directory name; never overwrite an existing metrics file when resuming.")
     parser.add_argument("--tokenizer", choices=("char", "word", "bpe"), default="char",
                         help="char: character-level; word: word-level with <unk>; "
                              "bpe: dependency-free byte-level BPE (recommended for real corpora).")
@@ -557,6 +566,10 @@ def main():
           f"{args.min_tokens_per_param:g} tokens/parameter to reduce memorization risk.")
 
     os.makedirs(args.out_dir, exist_ok=True)
+    run_name = args.run_name
+    if run_name is None:
+        run_name = "resume_" + time.strftime("%Y%m%d_%H%M%S") if resume_ckpt else None
+    tracker = ExperimentTracker(args.experiment_dir, run_name=run_name, config=vars(args), resume=False)
     val_history, train_history = [], []
     recent_training_losses = []
     memorization_warning_printed = False
@@ -600,6 +613,10 @@ def main():
                   f"| val_loss {val_value:.4f} | val_ppl {perplexity(val_value):.2f} "
                   f"| sparsity_k {k} | active_units/token {active} | compute_ratio_vs_dense {ratio:.2f}x "
                   f"| {time.time() - t0:.1f}s")
+            tracker.log(step=step, lr=lr, train_loss=train_value, val_loss=val_value,
+                         train_ppl=perplexity(train_value), val_ppl=perplexity(val_value),
+                         sparsity_k=k, active_units_per_token=active,
+                         compute_ratio_vs_dense=ratio, elapsed_sec=time.time()-t0)
             overfit = is_overfitting(val_history, train_history, args.overfit_patience)
             if overfit:
                 print(f"[WARNING] Validation loss has increased for {args.overfit_patience} consecutive evals while "
@@ -622,6 +639,10 @@ def main():
                 memorization_warning_printed = True
 
         if args.checkpoint_interval and step % args.checkpoint_interval == 0:
+            timing = tracker.checkpoint_timing(step, checkpoint_kind="training")
+            tracker.log(step=step, checkpoint=True, checkpoint_interval_sec=timing.get("interval_sec"),
+                         checkpoint_steps=timing.get("interval_steps"), checkpoint_steps_per_sec=timing.get("steps_per_sec"))
+            tracker.plot()
             save_checkpoint(
                 os.path.join(args.out_dir, f"gamax1_step_{step}.pt"),
                 model, optimizer, tok, vars(args), step, scaler=scaler,
@@ -643,6 +664,13 @@ def main():
         os.path.join(args.out_dir, "gamax1_latest.pt"),
         model, optimizer, tok, vars(args), final_step, scaler=scaler
     )
+    tracker.write_summary(final_step=final_step, parameter_count=parameter_count,
+                           corpus_tokens=len(data), tokens_per_parameter=corpus_ratio,
+                           final_train_loss=(train_history[-1] if train_history else None),
+                           final_val_loss=(val_history[-1] if val_history else None),
+                           final_train_ppl=(perplexity(train_history[-1]) if train_history else None),
+                           final_val_ppl=(perplexity(val_history[-1]) if val_history else None))
+    tracker.plot()
     tok.save(os.path.join(args.out_dir, "tokenizer.json"))
     if bulk_store is not None:
         del data
