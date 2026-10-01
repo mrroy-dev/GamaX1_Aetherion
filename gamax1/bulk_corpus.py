@@ -48,11 +48,16 @@ from .tokenizer import BPETokenizer
 
 
 # Explicit dataset paths used by the default corpus build.
+# Dataset locations are deliberately RELATIVE to ``data_dir``.
+# The old version hard-coded one Google Drive mount path here.  That made
+# the same corpus look different after moving/remounting Drive and could
+# trigger a 34k-file rebuild.  Cache identity must depend on corpus content
+# and stable relative paths, never on the current Drive mount path.
 DATASETS = {
-    "books_cleaned_v1": "/content/drive/MyDrive/Aetherion_GamaX1/data/books_cleaned_v1",
-    "Math_Reasoning_train": "/content/drive/MyDrive/Aetherion_GamaX1/data/Math_Reasoning/train/books",
-    "Conversations-200k_clean": "/content/drive/MyDrive/Aetherion_GamaX1/data/Conversations-200k_clean",
-    "Q&A": "/content/drive/MyDrive/Aetherion_GamaX1/data/QnA",
+    "books_cleaned_v1": "books_cleaned_v1",
+    "Math_Reasoning_train": "Math_Reasoning/train/books",
+    "Conversations-200k_clean": "Conversations-200k_clean",
+    "Q&A": "QnA",
 }
 
 DEFAULT_SOURCE_DIRS = DATASETS
@@ -471,13 +476,20 @@ class BulkTokenStore:
 
 def _collect_source_paths(data_dir: str | Path, source_dirs=DEFAULT_SOURCE_DIRS) -> dict[str, list[Path]]:
     """Collect text files from explicit dataset paths or legacy subfolders."""
+    root = Path(data_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"data directory does not exist: {root}")
+
     if isinstance(source_dirs, dict):
-        candidates = [(str(name), Path(path)) for name, path in source_dirs.items()]
+        candidates = []
+        for name, configured_path in source_dirs.items():
+            configured = Path(configured_path).expanduser()
+            # Relative dataset paths are resolved under the supplied data_dir.
+            # Absolute paths remain supported for advanced/custom callers.
+            source_path = configured if configured.is_absolute() else root / configured
+            candidates.append((str(name), source_path.resolve()))
     else:
-        root = Path(data_dir)
-        if not root.is_dir():
-            raise FileNotFoundError(f"data directory does not exist: {root}")
-        candidates = [(str(name), root / name) for name in source_dirs]
+        candidates = [(str(name), (root / name).resolve()) for name in source_dirs]
 
     sources: dict[str, list[Path]] = {}
     for name, source_path in candidates:
@@ -553,6 +565,99 @@ def sample_book_text(paths: list[Path], sample_chars: int) -> str:
     if not sample.strip():
         raise ValueError("input files contain no readable training text")
     return sample
+
+
+def _stable_file_key(data_dir: str | Path, source_name: str, path: Path) -> str:
+    """Return a Drive-mount-independent identity for one corpus file.
+
+    The old cache used the absolute path as its file-index key.  A remounted
+    Google Drive can legitimately change that prefix (for example MyDrive vs
+    shareDev), making every existing file appear to be new.  We instead store
+    ``source_name::relative/path`` so the same corpus remains identical across
+    machines, Colab sessions, and Drive mount points.
+    """
+    root = Path(data_dir).expanduser().resolve()
+    path = Path(path).expanduser().resolve()
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        # Custom absolute source directories outside data_dir are still
+        # supported.  Their identity uses the source-relative path.
+        parts = path.parts
+        relative = "/".join(parts[-4:])
+    return f"{source_name}::{relative}"
+
+
+def _stable_key_map(data_dir: str | Path, sources: dict[str, list[Path]]) -> dict[str, Path]:
+    """Map stable cache identities to current local paths."""
+    mapping: dict[str, Path] = {}
+    for source_name, paths in sources.items():
+        for path in paths:
+            mapping[_stable_file_key(data_dir, source_name, path)] = path
+    return mapping
+
+
+def _legacy_absolute_key_to_stable(
+    old_key: str, source_name: str, data_dir: str | Path, stable_to_path: dict[str, Path]
+) -> str | None:
+    """Best-effort migration of pre-fix absolute-path cache keys.
+
+    Existing caches created by the old code are preserved rather than thrown
+    away.  We recover their relative suffix by matching the current stable
+    path candidates.  This is only metadata migration; token bytes are not
+    touched.
+    """
+    if old_key in stable_to_path:
+        return old_key
+
+    old_norm = old_key.replace("\\", "/")
+    prefix = f"{source_name}::"
+    # If an old progress/index file already contains a stable key, keep it.
+    if old_norm.startswith(prefix):
+        return old_norm if old_norm in stable_to_path else None
+
+    # Match by the full relative suffix after the configured source root.
+    # Comparing suffixes avoids depending on the old /content/drive mount.
+    candidates = []
+    for stable_key, current_path in stable_to_path.items():
+        if not stable_key.startswith(prefix):
+            continue
+        rel = stable_key[len(prefix):]
+        if old_norm.endswith("/" + rel) or old_norm == rel:
+            candidates.append(stable_key)
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _migrate_file_index_paths(
+    index: dict, data_dir: str | Path, stable_to_path: dict[str, Path]
+) -> tuple[dict, bool]:
+    """Convert legacy absolute file-index keys to stable keys without rebuilding."""
+    files = index.get("files")
+    if not isinstance(files, dict):
+        return index, False
+
+    migrated: dict[str, dict] = {}
+    changed = False
+    for old_key, record in files.items():
+        source_name = str(record.get("source", "books")) if isinstance(record, dict) else "books"
+        stable_key = _legacy_absolute_key_to_stable(
+            str(old_key), source_name, data_dir, stable_to_path
+        )
+        if stable_key is None:
+            # Do not silently discard an unrecognizable entry.  Returning the
+            # original index lets the normal safety check decide whether it can
+            # be trusted.
+            return index, False
+        if stable_key != old_key:
+            changed = True
+        migrated[stable_key] = record
+
+    if changed:
+        index = dict(index)
+        index["files"] = migrated
+    return index, changed
 
 
 def _file_stat(path: Path) -> dict:
@@ -781,6 +886,8 @@ def build_or_load_bulk_tokens(
     path_to_source = {
         str(p): name for name, paths in sources.items() for p in paths
     }
+    stable_to_path = _stable_key_map(data_dir, sources)
+    path_to_stable = {str(path): key for key, path in stable_to_path.items()}
 
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
@@ -809,6 +916,16 @@ def build_or_load_bulk_tokens(
         file_index = None
     else:
         file_index = _load_file_index(cache, tokenizer_expected)
+        if file_index is not None:
+            file_index, migrated = _migrate_file_index_paths(
+                file_index, data_dir, stable_to_path
+            )
+            if migrated:
+                _save_file_index(cache, file_index)
+                print(
+                    "[CACHE MIGRATION] Converted legacy absolute file paths to "
+                    "Drive-independent cache identities; token stream reused."
+                )
 
     # An invalid/missing index means the existing binary cannot be trusted.
     # NEVER append to it: that would mix token IDs from different corpus/parser
@@ -826,11 +943,11 @@ def build_or_load_bulk_tokens(
 
         # Append-only storage cannot remove/replace a file in the middle.
         # If an existing file changed or disappeared, rebuild cleanly.
-        current_keys = {str(p) for p in all_paths}
+        current_keys = set(stable_to_path)
         changed = [
             key for key, record in files_record.items()
             if key not in current_keys or
-            _file_stat(Path(key)).get("size") != record.get("size")
+            _file_stat(stable_to_path[key]).get("size") != record.get("size")
         ]
         if changed:
             print(
@@ -846,7 +963,8 @@ def build_or_load_bulk_tokens(
     # Determine only genuinely new files.
     to_encode = []
     for path in all_paths:
-        key = str(path)
+        source_name = path_to_source[str(path)]
+        key = _stable_file_key(data_dir, source_name, path)
         stat = _file_stat(path)
         recorded = files_record.get(key)
         if recorded is None or recorded.get("size") != stat.get("size"):
@@ -864,21 +982,46 @@ def build_or_load_bulk_tokens(
 
         if resume_progress is not None:
             saved_paths = resume_progress.get("batch_paths")
-            current_paths = [str(p) for p in to_encode]
-            if saved_paths is not None and saved_paths != current_paths:
-                # New files were added/reordered. Try to resume the exact old
-                # batch instead of throwing away already-encoded progress.
-                saved_set = set(saved_paths)
-                if not all(p in {str(x) for x in all_paths} for p in saved_paths):
-                    resume_progress = None
-                else:
-                    # The old batch must be contiguous from its saved order;
-                    # after it completes, a subsequent invocation will append
-                    # newly discovered files.
-                    to_encode = [Path(p) for p in saved_paths]
-                    resume_progress = _load_resumable_progress(
-                        cache, token_path, tokenizer_expected, len(to_encode)
-                    )
+            current_keys = [
+                _stable_file_key(data_dir, path_to_source[str(p)], p) for p in to_encode
+            ]
+            if saved_paths is not None:
+                # New files may have appeared after an interruption.  Resume the
+                # exact old batch using stable identities, even if the Drive mount
+                # path changed since the previous session.
+                normalized_saved = []
+                for saved in saved_paths:
+                    saved = str(saved)
+                    if saved in stable_to_path:
+                        normalized_saved.append(saved)
+                        continue
+                    # Backward compatibility for an old absolute-path progress file.
+                    for stable_key, current_path in stable_to_path.items():
+                        if saved.replace("\\", "/").endswith(
+                            "/" + stable_key.split("::", 1)[-1]
+                        ):
+                            normalized_saved.append(stable_key)
+                            break
+                if normalized_saved != current_keys:
+                    if not normalized_saved or not all(k in stable_to_path for k in normalized_saved):
+                        resume_progress = None
+                    else:
+                        to_encode = [stable_to_path[k] for k in normalized_saved]
+                        resume_progress = _load_resumable_progress(
+                            cache, token_path, tokenizer_expected, len(to_encode)
+                        )
+                        if resume_progress is not None:
+                            # Progress created by the old code can still contain
+                            # absolute-path file-index keys. Convert those keys
+                            # before continuing so the next checkpoint is fully
+                            # path-independent.
+                            progress_files = resume_progress.get("files_record")
+                            if isinstance(progress_files, dict):
+                                migrated_progress, progress_migrated = _migrate_file_index_paths(
+                                    {"files": progress_files}, data_dir, stable_to_path
+                                )
+                                if progress_migrated:
+                                    resume_progress["files_record"] = migrated_progress["files"]
 
         if resume_progress is not None:
             start_index = int(resume_progress["files_done"])
@@ -902,7 +1045,9 @@ def build_or_load_bulk_tokens(
                         handle.truncate(expected_bytes)
             file_mode = "ab" if token_path.exists() else "wb"
 
-        batch_paths = [str(p) for p in to_encode]
+        batch_paths = [
+            _stable_file_key(data_dir, path_to_source[str(p)], p) for p in to_encode
+        ]
         with token_path.open(file_mode) as output:
             if file_mode == "r+b":
                 output.seek(0, 2)
@@ -945,7 +1090,7 @@ def build_or_load_bulk_tokens(
                 values = array("I", encoded)
                 values.tofile(output)
 
-                key = str(path)
+                key = _stable_file_key(data_dir, path_to_source[str(path)], path)
                 stat = _file_stat(path)
                 files_record[key] = {
                     "source": path_to_source[key],
