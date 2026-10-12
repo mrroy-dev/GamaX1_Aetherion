@@ -198,9 +198,12 @@ def main():
         # text (see bulk_corpus.py) with no separate code path to maintain.
         from .bulk_corpus import build_or_load_bulk_tokens
         from .train import get_batch
-        replay_data, replay_starts, _sources = build_or_load_bulk_tokens(
-            args.replay_data_dir, args.replay_cache_dir, tok, rebuild=False,
+        _replay_tok, _replay_store, _sources = build_or_load_bulk_tokens(
+            args.replay_data_dir, args.replay_cache_dir,
+            tokenizer=tok, rebuild=False,
         )
+        replay_data = _replay_store.tensor
+        replay_starts = None   # None -> get_batch samples fully random windows
         print(f"Replay corpus: {len(replay_data):,} tokens from {args.replay_data_dir} "
               f"(mixed in at ratio {args.replay_ratio:g})")
 

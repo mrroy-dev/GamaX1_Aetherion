@@ -1093,7 +1093,7 @@ def build_or_load_bulk_tokens(
                 key = _stable_file_key(data_dir, path_to_source[str(path)], path)
                 stat = _file_stat(path)
                 files_record[key] = {
-                    "source": path_to_source[key],
+                    "source": source_name,
                     "size": stat["size"],
                     "token_start": token_count,
                     "token_count": len(encoded),
