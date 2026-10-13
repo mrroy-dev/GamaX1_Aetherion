@@ -211,11 +211,13 @@ def main():
     if resume_path is not None and not os.path.isfile(resume_path):
         parser.error(f"Resume checkpoint does not exist: {resume_path}")
 
-    # Seed before creating any fresh-run objects. For resume, restore the saved
-    # RNG state later, after model/data/optimizer setup is complete.
-    torch.manual_seed(args.seed)
+    # Seed defensively before model construction. CLI defaults are resolved
+    # below (and a resume may inherit the seed saved in its checkpoint), so
+    # args.seed can still be None at this point.
+    initial_seed = 0 if args.seed is None else int(args.seed)
+    torch.manual_seed(initial_seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed_all(initial_seed)
 
     source_checkpoint = resume_path if resume_path is not None else args.init_from
     model, tok, base_cfg = load_base_checkpoint(source_checkpoint, device)
@@ -241,10 +243,32 @@ def main():
             setattr(args, name, saved_ft.get(name, fallback))
     if args.data is None:
         parser.error("--data is required for a new run; for resume, pass it or use a checkpoint containing saved fine-tuning metadata.")
+    if not os.path.exists(args.data):
+        parser.error(f"Training data path does not exist: {args.data}")
+    if args.batch_size < 1:
+        parser.error("--batch_size must be >= 1")
+    if args.epochs < 1:
+        parser.error("--epochs must be >= 1")
+    if args.max_len < 2:
+        parser.error("--max_len must be >= 2")
+    if args.lr <= 0:
+        parser.error("--lr must be > 0")
+    if not 0.0 <= args.val_fraction < 1.0:
+        parser.error("--val_fraction must be in [0, 1)")
+    if not 0.0 <= args.replay_ratio <= 1.0:
+        parser.error("--replay_ratio must be in [0, 1]")
+    if args.replay_ratio > 0 and not args.replay_data_dir:
+        print("[WARNING] --replay_ratio was set but --replay_data_dir is missing; replay will be disabled.")
     if args.max_len > base_cfg["block_size"]:
         raise ValueError(f"--max_len={args.max_len} exceeds base checkpoint's block_size="
                           f"{base_cfg['block_size']}; the model was never trained on sequences "
                           "this long.")
+
+    # Apply the resolved seed before building/splitting the dataset. A full
+    # resume restores the saved RNG state after setup, immediately before train.
+    torch.manual_seed(int(args.seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(args.seed))
 
     print(f"Loaded checkpoint from {source_checkpoint} (step {resume_ckpt.get('step', '?') if resume_ckpt else base_cfg.get('step', '?')})")
     print(f"Sparsity k: {model.sparsity_ctrl.k} (frozen: {args.freeze_sparsity})")
@@ -446,10 +470,11 @@ def main():
     )
     tok.save(os.path.join(args.out_dir, "tokenizer.json"))
     if best_val == float("inf"):
-        print(f"\nDone. No new validation run was needed; checkpoints saved under {args.out_dir}/")
+        print(f"\nDone. No validation score was recorded. Checkpoints saved under {args.out_dir}/")
     else:
         print(f"\nDone. Best val_loss: {best_val:.4f} (val_ppl {perplexity(best_val):.2f}). "
               f"Checkpoints saved under {args.out_dir}/")
+    print("Note: fine-tuning improves behavior only to the extent supported by the data; it cannot guarantee zero hallucinations.")
 
 
 if __name__ == "__main__":
