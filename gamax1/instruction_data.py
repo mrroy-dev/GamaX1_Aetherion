@@ -870,7 +870,20 @@ def split_train_val(
     seed: int = 0,
 ):
     """
-    Deterministically shuffle and split pairs.
+    Deterministically shuffle and split pairs, grouped by answer text.
+
+    Grouping by the answer (rather than a flat per-pair shuffle) matters
+    whenever the dataset contains paraphrased/reworded duplicates of the
+    same underlying fact -- e.g. data-augmentation that generates several
+    differently-worded questions for one answer. Such variants always
+    share the exact answer string, so grouping on it keeps every variant
+    of a given fact entirely in train or entirely in val. A flat shuffle
+    would often split them across both sides, letting the model see a
+    reworded version of a "held-out" fact during training -- silently
+    inflating validation accuracy without real generalization.
+
+    Pairs with a unique (non-duplicated) answer are unaffected: each is
+    simply its own group of size one, identical to the old behavior.
 
     The same:
 
@@ -885,16 +898,24 @@ def split_train_val(
 
     pairs = list(pairs)
 
-    # Deterministic local RNG.
-    rng = random.Random(seed)
-
-    rng.shuffle(pairs)
-
     if not pairs:
 
         return [], []
 
-    n_val = max(
+    # Group pairs by answer text (pairs are (prompt, answer) tuples).
+    groups: dict = {}
+    for pair in pairs:
+        answer = pair[1]
+        groups.setdefault(answer, []).append(pair)
+
+    group_keys = list(groups.keys())
+
+    # Deterministic local RNG.
+    rng = random.Random(seed)
+
+    rng.shuffle(group_keys)
+
+    n_val_target = max(
         1,
         int(
             len(pairs)
@@ -902,8 +923,17 @@ def split_train_val(
         ),
     )
 
-    val_pairs = pairs[:n_val]
-    train_pairs = pairs[n_val:]
+    val_pairs = []
+    train_pairs = []
+    val_count = 0
+
+    for key in group_keys:
+        group = groups[key]
+        if val_count < n_val_target:
+            val_pairs.extend(group)
+            val_count += len(group)
+        else:
+            train_pairs.extend(group)
 
     return (
         train_pairs,
