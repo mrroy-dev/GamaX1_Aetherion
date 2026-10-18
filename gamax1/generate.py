@@ -79,6 +79,17 @@ def main():
     parser.add_argument("--no_stop_at_eos", action="store_true",
                          help="With --chat, generate the full --max_new_tokens instead of "
                               "stopping at the assistant turn's eos_id.")
+    parser.add_argument("--knowledge_base", action="store_true",
+                         help="With --chat, try verified embedding-retrieval over the GamaX1 "
+                              "QnA knowledge base (gamax1.knowledge_qa) BEFORE generating with "
+                              "the model. On a confident, verified match the checkpoint is "
+                              "never loaded and the stored answer is printed directly -- this "
+                              "exists because fine-tuning alone does not reliably bind "
+                              "thousands of specific facts into this model's weights (see "
+                              "knowledge_qa.py's module docstring), while retrieval does so "
+                              "exactly, with false-positive checks (entity/ordinal/topic) to "
+                              "avoid confidently answering with the wrong fact. On no match, "
+                              "falls through to ordinary model generation below.")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
@@ -92,6 +103,28 @@ def main():
         parser.error("--repetition_penalty must be > 0")
     if args.no_stop_at_eos and not args.chat and not args.stop_at_eos:
         parser.error("--no_stop_at_eos is only meaningful with --chat")
+    if args.knowledge_base and not args.chat:
+        parser.error("--knowledge_base is only meaningful with --chat")
+
+    if args.knowledge_base:
+        # Retrieval-first: try this BEFORE loading the (much heavier) GamaX1
+        # checkpoint, so a knowledge-base hit skips the model load entirely.
+        from .knowledge_qa import load_knowledge_base, retrieve_verified
+        import sys as _sys
+        embedder, question_embeddings, records = load_knowledge_base()
+        hit = retrieve_verified(args.prompt, embedder, question_embeddings, records)
+        if hit is not None:
+            print(f"[knowledge_base] matched {hit['question']!r} "
+                  f"(similarity={hit['similarity']:.2f}, source={hit['source']})",
+                  file=_sys.stderr)
+            # Printed in the same shape as the --chat model-generation path
+            # below, so any caller that parses stdout (e.g. smart_answer's
+            # subprocess split on "<|assistant|>") sees an identical format
+            # regardless of which path actually answered.
+            print(f"\n\n<|user|>\n\n{args.prompt}\n\n<|assistant|>\n\n{hit['answer']}\n\n<|eos|>\n\n")
+            return
+        print("[knowledge_base] no confident verified match -- falling back to model generation",
+              file=_sys.stderr)
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     model, tok = load_model(args.ckpt, device)
