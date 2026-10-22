@@ -58,6 +58,18 @@ DATASETS = {
     "Math_Reasoning_train": "Math_Reasoning/train/books",
     "Conversations-200k_clean": "Conversations-200k_clean",
     "Q&A": "QnA",
+    "Discord-Dialogues": "Discord-Dialogues",
+    "Reddit-Constructive": "Reddit-Constructive",
+    # Same physical "QnA" folder registered under two extra source names.
+    # _collect_source_paths() resolves each DATASETS entry independently and
+    # _stable_file_key() keys on "source_name::relative_path", so these are
+    # treated as distinct corpus entries -- the same QnA files get encoded
+    # and counted three times total, giving each fact three independent
+    # exposures during pretraining instead of one. This is the standard
+    # "upsample a small high-value source by duplicating its directory
+    # entry" trick; it costs zero new parsing code.
+    "Q&A_repeat1": "QnA",
+    "Q&A_repeat2": "QnA",
 }
 
 DEFAULT_SOURCE_DIRS = DATASETS
@@ -113,6 +125,15 @@ DEFAULT_SOURCE_FORMATS = {
     "Math_Reasoning_train": SOURCE_FORMAT_USER_ASSISTANT,
     "Conversations-200k_clean": SOURCE_FORMAT_USER_ASSISTANT,
     "Q&A": SOURCE_FORMAT_USER_ASSISTANT,
+    "Q&A_repeat1": SOURCE_FORMAT_USER_ASSISTANT,
+    "Q&A_repeat2": SOURCE_FORMAT_USER_ASSISTANT,
+    # "User:"/"Assistant:" labels (see convert_discord_dialogues.py).
+    "Discord-Dialogues": SOURCE_FORMAT_USER_ASSISTANT,
+    # "Speaker 0:"/"Speaker 1:"/... -- genuinely multi-party, unfixed role
+    # identity across threads (see convert_reddit_constructive.py and the
+    # SOURCE_FORMAT_GENERIC_TURNS comment above for why this must NOT be
+    # tagged as user_assistant).
+    "Reddit-Constructive": SOURCE_FORMAT_GENERIC_TURNS,
 }
 
 _unknown_source_format_warned: set[str] = set()
