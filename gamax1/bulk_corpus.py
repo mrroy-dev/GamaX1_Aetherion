@@ -70,6 +70,10 @@ DATASETS = {
     # entry" trick; it costs zero new parsing code.
     "Q&A_repeat1": "QnA",
     "Q&A_repeat2": "QnA",
+    "Q&A_copy1": "QnA_copy1",   # नया — सिर्फ़ जोड़ें
+    "Q&A_copy2": "QnA_copy2",   # नया — सिर्फ़ जोड़ें
+    "Q&A_copy3": "QnA_copy3",   # नया — सिर्फ़ जोड़ें
+    
 }
 
 DEFAULT_SOURCE_DIRS = DATASETS
@@ -134,6 +138,9 @@ DEFAULT_SOURCE_FORMATS = {
     # SOURCE_FORMAT_GENERIC_TURNS comment above for why this must NOT be
     # tagged as user_assistant).
     "Reddit-Constructive": SOURCE_FORMAT_GENERIC_TURNS,
+     "Q&A_copy1": SOURCE_FORMAT_USER_ASSISTANT,   # नया
+    "Q&A_copy2": SOURCE_FORMAT_USER_ASSISTANT,   # नया
+    "Q&A_copy3": SOURCE_FORMAT_USER_ASSISTANT,   # नया
 }
 
 _unknown_source_format_warned: set[str] = set()
